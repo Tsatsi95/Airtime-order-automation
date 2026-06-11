@@ -1,0 +1,90 @@
+# Flash Order Automation – Setup Guide
+
+## What it does
+1. You upload client PO PDFs (MTN, Telkom, etc.)
+2. The app checks your stock-on-hand report to see what you already have
+3. It calculates the shortfall (what needs to be ordered)
+4. It pre-fills the network order templates with the correct quantities
+5. You review, adjust if needed, then download the completed templates ready to email
+
+---
+
+## One-time setup
+
+### Prerequisites
+- Python 3.10 or newer: https://www.python.org/downloads/
+- (Tick "Add Python to PATH" during install)
+
+### Install dependencies
+Open a terminal (Command Prompt or PowerShell) in the folder containing `app.py` and run:
+
+```
+pip install -r requirements.txt
+```
+
+---
+
+## Running the app
+
+In the same folder, run:
+
+```
+streamlit run app.py
+```
+
+Your browser will open automatically at `http://localhost:8501`.
+
+To stop the app, press **Ctrl+C** in the terminal.
+
+---
+
+## Using the app
+
+### Step 1 – Upload files (left sidebar)
+- **SOH Report** – the VVS stock-on-hand Excel file (`VVS - SOH Report *.xlsx`)
+- **MTN Order Template** – the Flash Logical Catalogue `.xlsm` file
+- **Telkom Order Template** – the Airtime Order Form `.xlsx` file
+- **Client PO PDFs** – one or more VPS purchase order PDFs (MTN, Telkom, etc.)
+
+The app auto-detects the network from the filename. You can override it if needed.
+
+### Step 2 – Analyse
+Click **Analyse Orders**. The app:
+- Extracts every line item from the PDFs
+- Looks up each product in the SOH report
+- Calculates the shortfall
+- Finds the matching row in each network's order template
+
+### Tab 1 – Stock Analysis
+Shows the full results table.
+- 🟢 **Green rows** – shortfall > 0 (needs ordering)
+- 🟡 **Yellow rows** – low confidence match (< 70%) – worth checking manually
+
+### Tab 2 – Review & Adjust
+Shows only rows that have a shortfall or low confidence. You can:
+- Edit the **Order Qty** directly in the table
+- Fix any wrong product matches
+- Click **Save changes** when done
+
+### Tab 3 – Download Templates
+- Per-network summary of what will be ordered
+- **Download** buttons for each completed order template
+- Email draft text ready to paste
+- CSV export of the full analysis
+
+---
+
+## Confidence scores
+| Score | Meaning |
+|-------|---------|
+| 80–100 | High confidence – match is almost certainly correct |
+| 70–79 | Good – worth a quick glance |
+| 55–69 | Low – review recommended before sending |
+| < 55 | Very low – manually assign the correct product in Tab 2 |
+
+---
+
+## Tips
+- Keep the SOH report, MTN template, and Telkom template in a shared folder so the team always uses the latest versions
+- The downloaded templates are full copies of the originals with only the QTY column filled in – all formulas and formatting are preserved
+- If a product shows "No match" in the template column, find it manually in Tab 2 and enter the quantity directly in the template before sending
