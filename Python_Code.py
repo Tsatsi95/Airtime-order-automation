@@ -1,6 +1,6 @@
 """
-Flash Group – Airtime Order Automation
-Streamlit app: upload client PO PDFs → check stock on hand → populate network order templates
+Flash Group - Airtime Order Automation
+Streamlit app: upload client PO PDFs/Excel -> check stock on hand -> populate network order templates
 
 Run:  streamlit run app.py
 """
@@ -34,7 +34,7 @@ def _parse_po_line(line: str):
 
     Format:  QTY   DESCRIPTION   UNIT_PRICE   DISC%   TOTAL
     QTY may use space-thousands-separator  e.g. '4 300' = 4300.
-    DISC% always has exactly 4 decimal places (5.5000, 6.4000 …).
+    DISC% always has exactly 4 decimal places (5.5000, 6.4000 ...).
     """
     disc = re.search(r'\b(\d+\.\d{4})\b', line)
     if not disc:
@@ -65,7 +65,7 @@ def _parse_po_line(line: str):
     return int(''.join(qty_parts)), ' '.join(desc_parts)
 
 
-def extract_po_items(pdf_bytes: bytes) -> list[dict]:
+def extract_po_items(pdf_bytes: bytes) -> list:
     """Return list of {qty, description} from a VPS purchase order PDF."""
     items, seen = [], set()
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -81,7 +81,49 @@ def extract_po_items(pdf_bytes: bytes) -> list[dict]:
     return items
 
 
-def guess_network(filename: str, items: list[dict]) -> str:
+def extract_po_items_excel(excel_bytes: bytes) -> list:
+    """Return list of {qty, description} from a client Excel PO template.
+
+    Both MTN and Telkom client Excel POs share the same layout:
+    - Row 10: headers (Product Code | Description / Stock Item | Type | Qty | ...)
+    - Data rows: col B = product description, col D = quantity ordered by client
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
+    ws = wb.active
+    items, seen = [], set()
+    header_found = False
+    desc_col = qty_col = None
+
+    for row in ws.iter_rows(values_only=True):
+        # Detect header row by 'Product Code' in first column
+        if row[0] == 'Product Code':
+            header_found = True
+            for i, v in enumerate(row):
+                if v in ('Description', 'Stock Item'):
+                    desc_col = i
+                elif v == 'Qty':
+                    qty_col = i
+            continue
+        if not header_found or desc_col is None or qty_col is None:
+            continue
+        desc = row[desc_col]
+        qty  = row[qty_col]
+        if not desc or qty is None:
+            continue
+        try:
+            qty_int = int(qty)
+        except (ValueError, TypeError):
+            continue
+        if qty_int <= 0:
+            continue
+        key = str(desc).strip().lower()
+        if key not in seen:
+            items.append({'qty': qty_int, 'description': str(desc).strip()})
+            seen.add(key)
+    return items
+
+
+def guess_network(filename: str, items: list) -> str:
     """Infer network from filename and/or product descriptions."""
     fn = filename.upper()
     for net in NETWORKS:
@@ -103,7 +145,7 @@ def load_soh(file_bytes: bytes) -> dict:
     """Returns {vendor: {product_name: total_qty}}."""
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
     ws = wb.active
-    soh: dict = defaultdict(lambda: defaultdict(int))
+    soh = defaultdict(lambda: defaultdict(int))
     header_found = False
     for row in ws.iter_rows(values_only=True):
         if row[0] == 'Date':
@@ -128,11 +170,11 @@ def _norm(text: str) -> str:
     return re.sub(r'\+', ' ', text)
 
 def _sizes(text: str) -> set:
-    """Extract data sizes, normalising '1.0gb' → '1gb' etc."""
+    """Extract data sizes, normalising '1.0gb' -> '1gb' etc."""
     raw = re.findall(r'\d+(?:\.\d+)?(?:mb|gb)', text.lower())
     result = set()
     for s in raw:
-        s = re.sub(r'\.0+(gb|mb)$', r'\1', s)  # 1.0gb → 1gb
+        s = re.sub(r'\.0+(gb|mb)$', r'\1', s)  # 1.0gb -> 1gb
         result.add(s)
     return result
 
@@ -142,7 +184,7 @@ def _rands(text: str) -> set:
 def _mins(text: str) -> set:
     return set(re.findall(r'(\d+)\s*min', text.lower()))
 
-def _period(text: str) -> str | None:
+def _period(text: str):
     t = text.lower()
     if re.search(r'3.?day|3day', t):   return '3day'
     if re.search(r'14.?day|14day', t): return '14day'
@@ -191,7 +233,7 @@ def _score(query: str, candidate: str) -> float:
     return float(score)
 
 
-def find_best(query: str, candidates: list[str], threshold: float = 45.0):
+def find_best(query: str, candidates: list, threshold: float = 45.0):
     best, best_score = None, 0.0
     for c in candidates:
         s = _score(query, c)
@@ -205,7 +247,7 @@ def find_best(query: str, candidates: list[str], threshold: float = 45.0):
 # ─────────────────────────────────────────────────────────────────────────────
 # TEMPLATE LOADERS
 # ─────────────────────────────────────────────────────────────────────────────
-def load_mtn_template_rows(file_bytes: bytes) -> list[tuple]:
+def load_mtn_template_rows(file_bytes: bytes) -> list:
     """Returns list of (excel_row_number, description_string).
 
     Uses the cell's actual .row property so the stored row number always
@@ -223,7 +265,7 @@ def load_mtn_template_rows(file_bytes: bytes) -> list[tuple]:
     return rows
 
 
-def load_telkom_template_rows(file_bytes: bytes) -> list[tuple]:
+def load_telkom_template_rows(file_bytes: bytes) -> list:
     """Returns list of (excel_row_number, product_name_string) for virtual products only."""
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
     ws = wb['Vouchers']
@@ -259,10 +301,10 @@ def load_telkom_template_rows(file_bytes: bytes) -> list[tuple]:
 # CORE PROCESSING
 # ─────────────────────────────────────────────────────────────────────────────
 def process_orders(
-    po_files: list[dict],                  # [{name, bytes, network}]
+    po_files: list,
     soh_bytes: bytes,
-    mtn_template_bytes: bytes | None,
-    telkom_template_bytes: bytes | None,
+    mtn_template_bytes,
+    telkom_template_bytes,
 ) -> pd.DataFrame:
     """
     Returns a DataFrame with one row per PO item:
@@ -279,7 +321,10 @@ def process_orders(
 
     records = []
     for pof in po_files:
-        items   = extract_po_items(pof['bytes'])
+        if pof.get('is_excel'):
+            items = extract_po_items_excel(pof['bytes'])
+        else:
+            items = extract_po_items(pof['bytes'])
         network = pof['network']
         soh_vendor = soh.get(network, {})
         soh_names  = list(soh_vendor.keys())
@@ -299,13 +344,13 @@ def process_orders(
             desc    = item['description']
             po_qty  = item['qty']
 
-            # Step 1: PO → SOH
+            # Step 1: PO -> SOH
             soh_match, soh_conf = find_best(desc, soh_names)
             soh_qty   = soh_vendor.get(soh_match, 0) if soh_match else 0
             shortfall  = max(0, po_qty - soh_qty)
             order_qty  = shortfall * 8          # order enough stock to last 8 days
 
-            # Step 2: SOH → template
+            # Step 2: SOH -> template
             tmpl_match, tmpl_conf = find_best(soh_match or desc, tmpl_names)
             tmpl_row_num = tmpl_row_map.get(tmpl_match, None) if tmpl_match else None
 
@@ -318,7 +363,7 @@ def process_orders(
                 'SOH Qty'        : soh_qty,
                 'SOH Confidence' : round(soh_conf),
                 'Shortfall'      : shortfall,
-                'Order Qty'      : order_qty,   # shortfall × 8 days; user can override
+                'Order Qty'      : order_qty,   # shortfall x 8 days; user can override
                 'Template Row'   : tmpl_row_num,
                 'Template Product': tmpl_match or '? No match',
                 'Tmpl Confidence': round(tmpl_conf),
@@ -330,7 +375,7 @@ def process_orders(
 # ─────────────────────────────────────────────────────────────────────────────
 # TEMPLATE POPULATION
 # ─────────────────────────────────────────────────────────────────────────────
-def debug_mtn_template(template_bytes: bytes, target_rows: list[int]) -> list[dict]:
+def debug_mtn_template(template_bytes: bytes, target_rows: list) -> list:
     """Return debug info for specific rows in the MTN template."""
     wb = openpyxl.load_workbook(io.BytesIO(template_bytes), keep_vba=True)
     ws = wb['ORDER TEMPLATE - (FLASH MyTown)']
@@ -362,7 +407,7 @@ def debug_mtn_template(template_bytes: bytes, target_rows: list[int]) -> list[di
 
 def _build_desc_row_map(ws, desc_col: int) -> dict:
     """Scan a worksheet and return {description_text: row_number} by reading
-    each cell in desc_col directly — no reliance on stored row numbers."""
+    each cell in desc_col directly - no reliance on stored row numbers."""
     result = {}
     for row_cells in ws.iter_rows():
         for cell in row_cells:
@@ -373,7 +418,7 @@ def _build_desc_row_map(ws, desc_col: int) -> dict:
 
 def populate_mtn_template(df: pd.DataFrame, template_bytes: bytes) -> bytes:
     """Write Order Qty into the MTN template by matching column B description,
-    not by stored row number — immune to any row-index offset issues."""
+    not by stored row number - immune to any row-index offset issues."""
     wb = openpyxl.load_workbook(io.BytesIO(template_bytes), keep_vba=True)
     ws = wb['ORDER TEMPLATE - (FLASH MyTown)']
 
@@ -382,7 +427,7 @@ def populate_mtn_template(df: pd.DataFrame, template_bytes: bytes) -> bytes:
         if merge_range.min_col <= 4 <= merge_range.max_col:
             ws.unmerge_cells(str(merge_range))
 
-    # Build live description→row map from column B of the template
+    # Build live description->row map from column B of the template
     desc_to_row = _build_desc_row_map(ws, desc_col=2)
 
     mtn_orders = df[(df['Network'] == 'MTN') & (df['Template Product'] != '? No match')]
@@ -397,7 +442,7 @@ def populate_mtn_template(df: pd.DataFrame, template_bytes: bytes) -> bytes:
         elif not excel_row:
             # Description from fuzzy match doesn't exactly match any cell in column B
             not_found.append((tmpl_desc, qty))
-        # qty == 0 means SOH covers demand — nothing to write, that's fine
+        # qty == 0 means SOH covers demand - nothing to write, that's fine
 
     # Store write log in session state for debug display
     import streamlit as _st
@@ -440,18 +485,18 @@ def populate_telkom_template(df: pd.DataFrame, template_bytes: bytes) -> bytes:
 FLASH_GREEN = "#B2FA00"
 FLASH_BLACK = "#0D0D0D"
 
-# Logo as base64 data URI — Streamlit strips raw <svg> but allows <img src="data:...">
+# Logo as base64 data URI - Streamlit strips raw <svg> but allows <img src="data:...">
 _LOGO_URI = "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjkwIiBoZWlnaHQ9IjI4NSIgdmlld0JveD0iMCAwIDI5MCAyODUiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTI4OS45NjUgMTQyLjVDMjg5Ljk2NSAyMjEuMTk5IDIyNS4wNTMgMjg1IDE0NC45ODMgMjg1QzY0LjkxMjQgMjg1IDAgMjIxLjE5OSAwIDE0Mi41QzAgNjMuODAwOSA2NC45MTI0IDAgMTQ0Ljk4MyAwQzIyNS4wNTMgMCAyODkuOTY1IDYzLjgwMDkgMjg5Ljk2NSAxNDIuNVoiIGZpbGw9IiNCMkZBMDAiLz48cGF0aCBkPSJNMjMyLjQwMyAxMTkuNTU1QzIyMy40NjQgMTEyLjczNiAyMTMuNjIgMTAyLjM4NCAyMTQuOTMyIDg4LjEzMDhDMjIxLjYyIDg2LjI1NyAyMjUuNDY0IDgyLjIwMjIgMjI3LjI3NyA3OC4zOTMyQzIyOS45OTYgNzIuODAyNiAyMjkuODcxIDY3LjA1ODMgMjI0LjcxNCA2MS4zNzU1QzIyNC4wNTggNjAuNjY5IDIyMi44NyA2MS4xNjA1IDIyMi45MzMgNjIuMTEyN0MyMjMuMTUyIDY2LjI5MDQgMjIzLjM3MSA3My42NjI3IDIxMy44MDcgNzUuNTk3OUMyMDMuMjc1IDc3Ljc0ODEgMTg1LjE3OSA3NS4xNjc4IDE3OS4wODUgNjkuNjM4NkMxNzMuNDYgNjQuNTM5NSAxNzIuODY2IDU4LjQyNjYgMTc3Ljk2IDQ4LjkwNDFDMTc4LjQyOSA0OC4wNDQgMTc3LjQ5MSA0Ny4xMjI0IDE3Ni42MTYgNDcuNTIxOEMxNzEuOTI4IDQ5Ljc2NDIgMTYzLjM2NSA1NC4xODc1IDE2My41NTIgNjYuOTA0N0MxNjMuNjc3IDc1LjM1MjEgMTY4LjY3OCA4Mi4xNDA4IDE3NS41ODUgODQuOTA1NEMxNDIuNzY5IDk0Ljg1OCAxMjkuMjM3IDgyLjg3OCA5MS45ODMgODIuMzU1OEM2MC45ODAxIDgxLjkyNTcgNTMuNzI5NCAxMDcuMjk5IDU1LjQ0ODMgMTMzLjI4NkM1Ni4xMzU4IDE0My41NDYgNTcuMDEwOSAxNTUuNjc5IDU5LjEwNDkgMTYzLjk0MkM2MC43OTI1IDE3MC43IDY0LjYwNTQgMTc0LjYzMiA2NC4yNjE2IDE4My4yMDJDNjQuMDExNiAxOTAuMTE0IDYzLjA0MjggMTkyLjk0IDY0LjE2NzkgMTk5LjUxNEM2NC40MTc5IDIwMC44OTYgNjUuMjkzIDIwMS43ODcgNjYuNzYxOSAyMDIuMjc4QzcwLjU0MzUgMjAzLjU2OCA3NS4wMTI2IDIwMi45MjMgNzYuODI1MyAyMDIuMzdDNzguNTEzIDIwMS44NzkgNzkuNzk0MyAyMDAuOTg4IDc5LjQ1MDYgMTk5LjUxNEM3Ni40MTkgMTg2LjU1MSA3My42MDYzIDE2OS4wMTEgNzYuNTc1MyAxNTcuMzY5Qzc2Ljk4MTYgMTU1LjcxIDc4LjQxOTIgMTU0LjA4MiA4MS4wMTMyIDE1NS40NjRDODUuMjAxMSAxNTcuNzM3IDg5LjU3NjUgMTYxLjIzOSA5NS4zMjcxIDE2Ny4xNjhDMTA0LjAxNSAxNzYuMTM3IDExMi4yMzUgMTkzLjc2OSAxMTMuNTE2IDIwNy4wN0MxMTMuNzA0IDIwOS4wOTggMTE0LjcwNCAyMTAuNzg3IDExNi40MjMgMjExLjM3MUMxMjEuMDQ4IDIxMi45OTkgMTI1Ljc2NyAyMTIuNDE1IDEyOC4yMzYgMjEwLjkxQzEyOS4yOTkgMjEwLjI2NSAxMjkuODYyIDIwOS4yODIgMTI5LjU4IDIwOC4xNzZDMTI2LjQyNCAxOTUuNTgyIDExNi4xNDIgMTgwLjQwNyAxMTUuMjM1IDE2Ny4wMTRDMTE1LjA0OCAxNjQuMjggMTE2LjAxNyAxNjQuMDM1IDExOC4yNjcgMTY0LjQwM0MxMjEuNzM2IDE2NC45ODcgMTI0LjQ1NSAxNjUuMjAyIDEyNi45ODYgMTY1LjMyNUMxMjcuODMgMTY1LjM1NSAxMjguNjc0IDE2NS43MjQgMTI5LjIwNSAxNjYuMzY5QzEzOS42NzUgMTc4Ljk2MyAxNTEuNDg5IDE5Ni44MSAxNTAuNjQ1IDIxNS4zNjRDMTUwLjYxNCAyMTYuNDA4IDE1MS4wODIgMjE3LjM2MSAxNTEuODk1IDIxOC4wMDZDMTU1LjQ4OSAyMjAuOTI0IDE1NS41NTIgMjI3LjQzNiAxNTYuMTQ1IDIzMy4zOTVDMTU2LjI3IDIzNC42NTUgMTU3LjA1MiAyMzUuNzYxIDE1OC4yMzkgMjM2LjE5MUMxNjIuNTgzIDIzNy44MTkgMTY4LjExNSAyMzguMDk1IDE3Mi43MDkgMjM2LjM0NEMxNzMuNTIyIDIzNi4wMzcgMTc0LjA1MyAyMzUuMjY5IDE3My45MjggMjM0LjQ0QzE3Mi4yMDkgMjIyLjczNiAxNjIuODAyIDIxMi45MzcgMTY1LjAyMSAxOTUuNDI4QzE2NS40OSAxOTEuNjE5IDE2OC41NTMgMTg2LjE1MSAxNzAuNjE1IDE3OS4wODZDMTc1LjUyMiAxNjIuMzQ1IDE3NC4zMDMgMTU3LjAzMSAxNzkuMTE2IDE0Ny41MDhDMTgyLjIxIDE0MS4zNjUgMTg5LjI0MiAxMzMuNDQgMTk5LjAyNCAxMzguOTk5QzIwNi41MjUgMTQzLjIzOSAyMTEuNzQ0IDE0NC4xMjkgMjE3LjEyIDE0My40MjNDMjI2LjQ5NiAxNDIuMTk0IDIzMi41MjggMTM0LjIwNyAyMzQuNzE1IDEyNS44MjJDMjM1LjIxNSAxMjMuNDg3IDIzNC4zNCAxMjEuMDMgMjMyLjQwMyAxMTkuNTU1WiIgZmlsbD0iYmxhY2siLz48L3N2Zz4="
 LOGO_LG = '<img src="' + _LOGO_URI + '" width="56" height="56" style="flex-shrink:0">'
 LOGO_SM = '<img src="' + _LOGO_URI + '" width="40" height="40" style="flex-shrink:0">'
 
 st.set_page_config(
-    page_title="Flash Cellular – Order Automation",
+    page_title="Flash Cellular - Order Automation",
     page_icon=_LOGO_URI,
     layout="wide",
 )
 
-# ── Brand CSS ──────────────────────────────────────────────────────────────────────────────
+# Brand CSS
 st.markdown(f"""
 <style>
   div.stButton > button[kind="primary"] {{
@@ -479,7 +524,7 @@ st.markdown(
     f'<span class="badge">Cellular Team</span></div></div>',
     unsafe_allow_html=True,
 )
-st.caption("Upload client POs  →  check stock on hand  →  populate network order templates for review")
+st.caption("Upload client POs  ->  check stock on hand  ->  populate network order templates for review")
 
 with st.sidebar:
     st.markdown(
@@ -494,7 +539,7 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.header("Reference Files")
-    st.caption("Upload once per session – or re-upload when files are updated.")
+    st.caption("Upload once per session - or re-upload when files are updated.")
 
     soh_file = st.file_uploader(
         "Stock on Hand Report (.xlsx)",
@@ -513,23 +558,24 @@ with st.sidebar:
     )
 
     st.divider()
-    st.header(" Client Purchase Orders")
+    st.header("Client Purchase Orders")
     po_uploads = st.file_uploader(
-        "Client PO PDFs (one or more)",
-        type=['pdf'],
+        "Client POs - PDF or Excel (one or more)",
+        type=['pdf', 'xlsx', 'xls'],
         accept_multiple_files=True,
         key='pos',
     )
 
-# ── Main: network selection for each PO ──────────────────────────────────────
+# Main: network selection for each PO
 po_files_ready = []
 
 if po_uploads:
-    st.subheader("Step 1 – Confirm network for each PO")
+    st.subheader("Step 1 - Confirm network for each PO")
     cols = st.columns(min(len(po_uploads), 3))
     for i, f in enumerate(po_uploads):
         raw = f.read()
-        preview_items = extract_po_items(raw)
+        is_excel = f.name.lower().endswith(('.xlsx', '.xls'))
+        preview_items = extract_po_items_excel(raw) if is_excel else extract_po_items(raw)
         auto_net = guess_network(f.name, preview_items)
         # Reset network selection if this file slot now holds a different file
         if st.session_state.get(f'prev_po_{i}') != f.name:
@@ -544,9 +590,9 @@ if po_uploads:
                 index=NETWORKS.index(auto_net),
                 key=f'net_{i}',
             )
-        po_files_ready.append({'name': f.name, 'bytes': raw, 'network': chosen})
+        po_files_ready.append({'name': f.name, 'bytes': raw, 'network': chosen, 'is_excel': is_excel})
 
-# ── Process button ────────────────────────────────────────────────────────────
+# Process button
 networks_in_pos   = {pof['network'] for pof in po_files_ready}
 needs_mtn_tmpl    = 'MTN'    in networks_in_pos
 needs_telkom_tmpl = 'Telkom' in networks_in_pos
@@ -555,7 +601,7 @@ missing = []
 if not soh_file:                               missing.append("SOH Report")
 if needs_mtn_tmpl    and not mtn_tmpl_file:    missing.append("MTN Template")
 if needs_telkom_tmpl and not telkom_tmpl_file: missing.append("Telkom Template")
-if not po_files_ready:                         missing.append("at least one PO PDF")
+if not po_files_ready:                         missing.append("at least one client PO")
 
 if missing:
     st.info(f"Upload to continue: {', '.join(missing)}")
@@ -566,7 +612,7 @@ if st.button("Analyse Orders", type="primary", use_container_width=True):
     soh_bytes_val         = soh_file.read()
     mtn_tmpl_bytes_val    = mtn_tmpl_file.read()    if mtn_tmpl_file    else None
     telkom_tmpl_bytes_val = telkom_tmpl_file.read() if telkom_tmpl_file else None
-    with st.spinner("Parsing PDFs and matching products…"):
+    with st.spinner("Parsing POs and matching products..."):
         df = process_orders(
             po_files=po_files_ready,
             soh_bytes=soh_bytes_val,
@@ -580,12 +626,12 @@ if st.button("Analyse Orders", type="primary", use_container_width=True):
 if 'results_df' not in st.session_state:
     st.stop()
 
-df: pd.DataFrame = st.session_state['results_df'].copy()
+df = st.session_state['results_df'].copy()
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs([" Stock Analysis", "✏️ Review & Adjust", " Download Templates"])
+# Tabs
+tab1, tab2, tab3 = st.tabs(["Stock Analysis", "Review & Adjust", "Download Templates"])
 
-# ─── Tab 1: Stock Analysis ────────────────────────────────────────────────────
+# Tab 1: Stock Analysis
 with tab1:
     n_items     = len(df)
     n_shortfall = int((df['Shortfall'] > 0).sum())
@@ -621,9 +667,9 @@ with tab1:
     styled = df[display_cols].style.apply(_colour_row, axis=1)
     st.dataframe(styled, use_container_width=True, height=600)
 
-    st.caption("[G] Green = shortfall to order  [Y] Yellow = low confidence match – review recommended")
+    st.caption("[G] Green = shortfall to order  [Y] Yellow = low confidence match - review recommended")
 
-# ─── Tab 2: Review & Adjust ───────────────────────────────────────────────────
+# Tab 2: Review & Adjust
 with tab2:
     st.subheader("Review matches and adjust quantities")
     st.caption("Change Order Qty to 0 if you don't want to include an item.  Fix wrong matches by editing the Template Product column.")
@@ -668,19 +714,17 @@ with tab2:
             # Merge edits back into main df
             for col in ['Order Qty', 'Template Product']:
                 df.loc[edited.index, col] = edited[col]
-            # Re-resolve template row numbers after any template product changes
-            # (simplified: keep existing rows for unchanged products)
             st.session_state['results_df'] = df
             st.success("Adjustments saved. Switch to the Download tab.")
 
-# ─── Tab 3: Download Templates ────────────────────────────────────────────────
+# Tab 3: Download Templates
 with tab3:
     st.subheader("Download populated order templates")
 
     df_final = st.session_state['results_df']
     networks_in_order = df_final['Network'].unique().tolist()
 
-    mtn_bytes_raw   = st.session_state.get('mtn_tmpl_bytes')
+    mtn_bytes_raw    = st.session_state.get('mtn_tmpl_bytes')
     telkom_bytes_raw = st.session_state.get('telkom_tmpl_bytes')
 
     # Re-read the template bytes fresh (they may have been read() already)
@@ -694,7 +738,7 @@ with tab3:
         n_mtn = len(mtn_orders)
         total_mtn = int(mtn_orders['Order Qty'].sum())
 
-        st.markdown(f"### MTN Order Template")
+        st.markdown("### MTN Order Template")
         st.markdown(f"**{n_mtn}** product(s) to order, **{total_mtn:,}** total units")
 
         if n_mtn > 0:
@@ -705,7 +749,7 @@ with tab3:
 
             populated_mtn = populate_mtn_template(df_final, mtn_bytes_raw)
 
-            # DEBUG: show what was written vs skipped
+            # Show what was written vs skipped
             log = st.session_state.get('_mtn_write_log', {})
             with st.expander("Write log", expanded=True):
                 written   = log.get('written', [])
@@ -715,19 +759,19 @@ with tab3:
                     st.dataframe(pd.DataFrame(written, columns=['Template Product', 'Excel Row', 'Qty']),
                                  use_container_width=True)
                 if not_found:
-                    st.error(f"Not found in template — description mismatch ({len(not_found)} rows):")
+                    st.error(f"Not found in template - description mismatch ({len(not_found)} rows):")
                     st.dataframe(pd.DataFrame(not_found, columns=['Template Product', 'Qty']),
                                  use_container_width=True)
                 if not written and not not_found:
-                    st.info("No quantities to write — SOH covers all ordered products.")
+                    st.info("No quantities to write - SOH covers all ordered products.")
             st.download_button(
-                label="[Download] Download MTN Order Template (.xlsm)",
+                label="Download MTN Order Template (.xlsm)",
                 data=populated_mtn,
                 file_name="MTN_Order_Template_POPULATED.xlsm",
                 mime="application/vnd.ms-excel.sheet.macroEnabled.12",
             )
         else:
-            st.success("[OK] No MTN stock needs to be ordered – SOH covers all client requests.")
+            st.success("No MTN stock needs to be ordered - SOH covers all client requests.")
 
     if 'Telkom' in networks_in_order and telkom_bytes_raw:
         tel_orders = df_final[(df_final['Network'] == 'Telkom') & (df_final['Order Qty'] > 0)]
@@ -744,13 +788,13 @@ with tab3:
             )
             populated_telkom = populate_telkom_template(df_final, telkom_bytes_raw)
             st.download_button(
-                label="[Download] Download Telkom Order Template (.xlsx)",
+                label="Download Telkom Order Template (.xlsx)",
                 data=populated_telkom,
                 file_name="Telkom_Order_Template_POPULATED.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         else:
-            st.success("[OK] No Telkom stock needs to be ordered – SOH covers all client requests.")
+            st.success("No Telkom stock needs to be ordered - SOH covers all client requests.")
 
     st.divider()
     st.subheader("Email drafts")
@@ -781,7 +825,7 @@ with tab3:
     st.divider()
     csv = df_final.to_csv(index=False).encode()
     st.download_button(
-        "[Download] Download full analysis as CSV",
+        "Download full analysis as CSV",
         data=csv,
         file_name="order_analysis.csv",
         mime="text/csv",
