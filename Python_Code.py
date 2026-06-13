@@ -206,14 +206,20 @@ def find_best(query: str, candidates: list[str], threshold: float = 45.0):
 # TEMPLATE LOADERS
 # ─────────────────────────────────────────────────────────────────────────────
 def load_mtn_template_rows(file_bytes: bytes) -> list[tuple]:
-    """Returns list of (excel_row_number, description_string)."""
+    """Returns list of (excel_row_number, description_string).
+
+    Uses the cell's actual .row property so the stored row number always
+    matches the real Excel row, regardless of where the sheet's data starts.
+    """
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), keep_vba=True)
     ws = wb['ORDER TEMPLATE - (FLASH MyTown)']
     rows = []
-    for idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+    for row_cells in ws.iter_rows():
+        actual_row = row_cells[0].row
+        values = tuple(c.value for c in row_cells)
         # Product rows have a non-None PART# (col A = index 0) and DESCRIPTION (col B = index 1)
-        if row[0] and row[1] and row[0] != 'PART #':
-            rows.append((idx, str(row[1])))
+        if values[0] and values[1] and values[0] != 'PART #':
+            rows.append((actual_row, str(values[1])))
     return rows
 
 
@@ -231,9 +237,11 @@ def load_telkom_template_rows(file_bytes: bytes) -> list[tuple]:
     }
     SIM_KW = ['sim card', 'blister', 'starter pack', 'internet sim']
     rows = []
-    for idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
-        name = row[1]    # col C (sheet starts at B, so tuple[0]=B, tuple[1]=C)
-        mat_no = row[2]  # col D
+    for row_cells in ws.iter_rows():
+        actual_row = row_cells[0].row
+        values = tuple(c.value for c in row_cells)
+        name = values[1]    # col C (sheet starts at B, so tuple[0]=B, tuple[1]=C)
+        mat_no = values[2]  # col D
         if not name or not mat_no:
             continue
         sname = str(name).strip()
@@ -243,7 +251,7 @@ def load_telkom_template_rows(file_bytes: bytes) -> list[tuple]:
             continue
         if sname.startswith(('Huawei', 'Samsung', 'Sub', 'Product')):
             continue
-        rows.append((idx, sname))
+        rows.append((actual_row, sname))
     return rows
 
 
@@ -294,7 +302,8 @@ def process_orders(
             # Step 1: PO → SOH
             soh_match, soh_conf = find_best(desc, soh_names)
             soh_qty   = soh_vendor.get(soh_match, 0) if soh_match else 0
-            shortfall = max(0, po_qty - soh_qty)
+            shortfall  = max(0, po_qty - soh_qty)
+            order_qty  = shortfall * 8          # order enough stock to last 8 days
 
             # Step 2: SOH → template
             tmpl_match, tmpl_conf = find_best(soh_match or desc, tmpl_names)
@@ -305,13 +314,13 @@ def process_orders(
                 'Network'        : network,
                 'PO Description' : desc,
                 'PO Qty'         : po_qty,
-                'SOH Product'    : soh_match or '❓ No match',
+                'SOH Product'    : soh_match or '? No match',
                 'SOH Qty'        : soh_qty,
                 'SOH Confidence' : round(soh_conf),
                 'Shortfall'      : shortfall,
-                'Order Qty'      : shortfall,   # user can override
+                'Order Qty'      : order_qty,   # shortfall × 8 days; user can override
                 'Template Row'   : tmpl_row_num,
-                'Template Product': tmpl_match or '❓ No match',
+                'Template Product': tmpl_match or '? No match',
                 'Tmpl Confidence': round(tmpl_conf),
             })
 
@@ -321,17 +330,78 @@ def process_orders(
 # ─────────────────────────────────────────────────────────────────────────────
 # TEMPLATE POPULATION
 # ─────────────────────────────────────────────────────────────────────────────
-def populate_mtn_template(df: pd.DataFrame, template_bytes: bytes) -> bytes:
-    """Write Order Qty values into the MTN template and return as bytes."""
+def debug_mtn_template(template_bytes: bytes, target_rows: list[int]) -> list[dict]:
+    """Return debug info for specific rows in the MTN template."""
     wb = openpyxl.load_workbook(io.BytesIO(template_bytes), keep_vba=True)
     ws = wb['ORDER TEMPLATE - (FLASH MyTown)']
 
-    # Build map: template_row_number → order_qty
-    mtn_rows = df[(df['Network'] == 'MTN') & (df['Template Row'].notna())]
-    for _, row in mtn_rows.iterrows():
-        excel_row = int(row['Template Row'])
+    # All merged ranges
+    merged = {str(r): (r.min_row, r.max_row, r.min_col, r.max_col)
+              for r in ws.merged_cells.ranges}
+
+    info = []
+    for r in target_rows:
+        cell = ws.cell(row=r, column=4)
+        # Check if this cell is inside any merge
+        in_merge = None
+        for rng_str, (r1, r2, c1, c2) in merged.items():
+            if r1 <= r <= r2 and c1 <= 4 <= c2:
+                in_merge = rng_str
+                break
+        info.append({
+            'excel_row': r,
+            'col_A': ws.cell(row=r, column=1).value,
+            'col_B': ws.cell(row=r, column=2).value,
+            'col_C': ws.cell(row=r, column=3).value,
+            'col_D_before': cell.value,
+            'col_D_type':   cell.data_type,
+            'in_merge':     in_merge or 'none',
+        })
+    return info
+
+
+def _build_desc_row_map(ws, desc_col: int) -> dict:
+    """Scan a worksheet and return {description_text: row_number} by reading
+    each cell in desc_col directly — no reliance on stored row numbers."""
+    result = {}
+    for row_cells in ws.iter_rows():
+        for cell in row_cells:
+            if cell.column == desc_col and cell.value:
+                result[str(cell.value).strip()] = cell.row
+    return result
+
+
+def populate_mtn_template(df: pd.DataFrame, template_bytes: bytes) -> bytes:
+    """Write Order Qty into the MTN template by matching column B description,
+    not by stored row number — immune to any row-index offset issues."""
+    wb = openpyxl.load_workbook(io.BytesIO(template_bytes), keep_vba=True)
+    ws = wb['ORDER TEMPLATE - (FLASH MyTown)']
+
+    # Unmerge any ranges that overlap column D so writes always land
+    for merge_range in list(ws.merged_cells.ranges):
+        if merge_range.min_col <= 4 <= merge_range.max_col:
+            ws.unmerge_cells(str(merge_range))
+
+    # Build live description→row map from column B of the template
+    desc_to_row = _build_desc_row_map(ws, desc_col=2)
+
+    mtn_orders = df[(df['Network'] == 'MTN') & (df['Template Product'] != '? No match')]
+    written, not_found = [], []
+    for _, row in mtn_orders.iterrows():
+        tmpl_desc = str(row['Template Product']).strip()
+        excel_row = desc_to_row.get(tmpl_desc)
         qty = int(row['Order Qty'])
-        ws.cell(row=excel_row, column=4).value = qty if qty > 0 else None
+        if excel_row and qty > 0:
+            ws.cell(row=excel_row, column=4).value = qty
+            written.append((tmpl_desc, excel_row, qty))
+        elif not excel_row:
+            # Description from fuzzy match doesn't exactly match any cell in column B
+            not_found.append((tmpl_desc, qty))
+        # qty == 0 means SOH covers demand — nothing to write, that's fine
+
+    # Store write log in session state for debug display
+    import streamlit as _st
+    _st.session_state['_mtn_write_log'] = {'written': written, 'not_found': not_found}
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -339,16 +409,25 @@ def populate_mtn_template(df: pd.DataFrame, template_bytes: bytes) -> bytes:
 
 
 def populate_telkom_template(df: pd.DataFrame, template_bytes: bytes) -> bytes:
-    """Write Order Qty values into the Telkom template (Vouchers sheet) and return as bytes."""
+    """Write Order Qty into the Telkom template by matching column C description."""
     wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
     ws = wb['Vouchers']
 
-    # Telkom sheet: min_col=B(2), so Quantity = col E = column 5
-    tel_rows = df[(df['Network'] == 'Telkom') & (df['Template Row'].notna())]
-    for _, row in tel_rows.iterrows():
-        excel_row = int(row['Template Row'])
+    # Unmerge any ranges that overlap column E
+    for merge_range in list(ws.merged_cells.ranges):
+        if merge_range.min_col <= 5 <= merge_range.max_col:
+            ws.unmerge_cells(str(merge_range))
+
+    # Telkom: descriptions are in column C (3), quantities go in column E (5)
+    desc_to_row = _build_desc_row_map(ws, desc_col=3)
+
+    tel_orders = df[(df['Network'] == 'Telkom') & (df['Template Product'] != '? No match')]
+    for _, row in tel_orders.iterrows():
+        tmpl_desc = str(row['Template Product']).strip()
+        excel_row = desc_to_row.get(tmpl_desc)
         qty = int(row['Order Qty'])
-        ws.cell(row=excel_row, column=5).value = qty if qty > 0 else None
+        if excel_row and qty > 0:
+            ws.cell(row=excel_row, column=5).value = qty
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -434,7 +513,7 @@ with st.sidebar:
     )
 
     st.divider()
-    st.header("📋 Client Purchase Orders")
+    st.header(" Client Purchase Orders")
     po_uploads = st.file_uploader(
         "Client PO PDFs (one or more)",
         type=['pdf'],
@@ -482,7 +561,7 @@ if missing:
     st.info(f"Upload to continue: {', '.join(missing)}")
     st.stop()
 
-if st.button("🔍 Analyse Orders", type="primary", use_container_width=True):
+if st.button("Analyse Orders", type="primary", use_container_width=True):
     # Read each file once into memory to avoid double-read issues
     soh_bytes_val         = soh_file.read()
     mtn_tmpl_bytes_val    = mtn_tmpl_file.read()    if mtn_tmpl_file    else None
@@ -504,7 +583,7 @@ if 'results_df' not in st.session_state:
 df: pd.DataFrame = st.session_state['results_df'].copy()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📊 Stock Analysis", "✏️ Review & Adjust", "📥 Download Templates"])
+tab1, tab2, tab3 = st.tabs([" Stock Analysis", "✏️ Review & Adjust", " Download Templates"])
 
 # ─── Tab 1: Stock Analysis ────────────────────────────────────────────────────
 with tab1:
@@ -542,7 +621,7 @@ with tab1:
     styled = df[display_cols].style.apply(_colour_row, axis=1)
     st.dataframe(styled, use_container_width=True, height=600)
 
-    st.caption("🟢 Green = shortfall to order  🟡 Yellow = low confidence match – review recommended")
+    st.caption("[G] Green = shortfall to order  [Y] Yellow = low confidence match – review recommended")
 
 # ─── Tab 2: Review & Adjust ───────────────────────────────────────────────────
 with tab2:
@@ -585,7 +664,7 @@ with tab2:
             key='editor',
         )
 
-        if st.button("💾 Save adjustments", type="secondary"):
+        if st.button("Save adjustments", type="secondary"):
             # Merge edits back into main df
             for col in ['Order Qty', 'Template Product']:
                 df.loc[edited.index, col] = edited[col]
@@ -620,19 +699,35 @@ with tab3:
 
         if n_mtn > 0:
             st.dataframe(
-                mtn_orders[['PO Description', 'SOH Product', 'PO Qty', 'SOH Qty', 'Order Qty', 'Template Product']],
+                mtn_orders[['PO Description', 'SOH Product', 'PO Qty', 'SOH Qty', 'Order Qty', 'Template Product', 'Template Row']],
                 use_container_width=True,
             )
 
             populated_mtn = populate_mtn_template(df_final, mtn_bytes_raw)
+
+            # DEBUG: show what was written vs skipped
+            log = st.session_state.get('_mtn_write_log', {})
+            with st.expander("Write log", expanded=True):
+                written   = log.get('written', [])
+                not_found = log.get('not_found', [])
+                if written:
+                    st.success(f"Written to template ({len(written)} rows):")
+                    st.dataframe(pd.DataFrame(written, columns=['Template Product', 'Excel Row', 'Qty']),
+                                 use_container_width=True)
+                if not_found:
+                    st.error(f"Not found in template — description mismatch ({len(not_found)} rows):")
+                    st.dataframe(pd.DataFrame(not_found, columns=['Template Product', 'Qty']),
+                                 use_container_width=True)
+                if not written and not not_found:
+                    st.info("No quantities to write — SOH covers all ordered products.")
             st.download_button(
-                label="⬇️ Download MTN Order Template (.xlsm)",
+                label="[Download] Download MTN Order Template (.xlsm)",
                 data=populated_mtn,
                 file_name="MTN_Order_Template_POPULATED.xlsm",
                 mime="application/vnd.ms-excel.sheet.macroEnabled.12",
             )
         else:
-            st.success("✅ No MTN stock needs to be ordered – SOH covers all client requests.")
+            st.success("[OK] No MTN stock needs to be ordered – SOH covers all client requests.")
 
     if 'Telkom' in networks_in_order and telkom_bytes_raw:
         tel_orders = df_final[(df_final['Network'] == 'Telkom') & (df_final['Order Qty'] > 0)]
@@ -649,24 +744,24 @@ with tab3:
             )
             populated_telkom = populate_telkom_template(df_final, telkom_bytes_raw)
             st.download_button(
-                label="⬇️ Download Telkom Order Template (.xlsx)",
+                label="[Download] Download Telkom Order Template (.xlsx)",
                 data=populated_telkom,
                 file_name="Telkom_Order_Template_POPULATED.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         else:
-            st.success("✅ No Telkom stock needs to be ordered – SOH covers all client requests.")
+            st.success("[OK] No Telkom stock needs to be ordered – SOH covers all client requests.")
 
     st.divider()
-    st.subheader("\U0001f4e7 Email drafts")
-    st.caption("Copy these into your email client after attaching the downloaded template.")
-
+    st.subheader("Email drafts")
+    st.caption("Copy these into your email client before sending the template.")
+    networks_in_order = sorted(df_final[df_final["Order Qty"] > 0]["Network"].unique())
     for net in networks_in_order:
-        net_orders = df_final[(df_final['Network'] == net) & (df_final['Order Qty'] > 0)]
+        net_orders = df_final[(df_final["Network"] == net) & (df_final["Order Qty"] > 0)]
         if net_orders.empty:
             continue
         n     = len(net_orders)
-        total = int(net_orders['Order Qty'].sum())
+        total = int(net_orders["Order Qty"].sum())
         items_list = "\n".join(
             f"  - {row['Template Product']} ({int(row['Order Qty'])} units)"
             for _, row in net_orders.iterrows()
@@ -686,7 +781,7 @@ with tab3:
     st.divider()
     csv = df_final.to_csv(index=False).encode()
     st.download_button(
-        "\u2b07\ufe0f Download full analysis as CSV",
+        "[Download] Download full analysis as CSV",
         data=csv,
         file_name="order_analysis.csv",
         mime="text/csv",
