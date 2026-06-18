@@ -1,198 +1,129 @@
-Project Planning — Flash Airtime Order Automation
+# Flash Group – Airtime Order Automation
 
-1. Problem Statement
+> **Cellular Team internal tool** · Built with Python + Streamlit
 
-The Flash Group Cellular team processes airtime orders from client Purchase Orders (POs) on a recurring basis. Each cycle requires:
+Automates the end-to-end airtime ordering workflow for the Flash Group Cellular team. Upload client Purchase Order PDFs, check live stock-on-hand, and get network order templates pre-filled and ready to send — in one click.
 
+---
 
-Reading one or more client PO PDFs manually
-Checking current stock-on-hand (SOH) against what the client has ordered
-Calculating the shortfall (what needs to be purchased from the network)
-Typing those quantities into network-specific order templates (MTN, Telkom)
-Drafting supplier emails
+## The Problem It Solves
 
+Every ordering cycle the team had to:
+1. Manually read each client PO PDF
+2. Cross-reference quantities against the VVS stock-on-hand report
+3. Calculate the shortfall for each product
+4. Manually type quantities into the MTN and Telkom order templates
+5. Draft emails to the network suppliers
 
-This process was entirely manual, time-consuming, and prone to transcription errors. The goal was to automate it end-to-end.
+This took significant time and was prone to transcription errors. This tool collapses all five steps into a single automated workflow.
 
+---
 
-2. Goals
+## Features
 
-Must-have (MVP)
+- **PDF parsing** — Extracts line items (product + quantity) from VPS purchase order PDFs, handling space-separated thousands (`4 300` → 4 300)
+- **SOH lookup** — Aggregates stock-on-hand from the VVS Excel report (summing multiple batches of the same product)
+- **Shortfall calculation** — Computes `order qty = PO qty − SOH` per product
+- **Fuzzy product matching** — Two-hop matching (PO description → SOH product → template row) using `rapidfuzz` with size/period/content-type aware scoring
+- **Template population** — Writes order quantities directly into the MTN `.xlsm` and Telkom `.xlsx` order templates, preserving all formulas and formatting
+- **Review & adjust** — Editable results table so the team can override any quantity or fix a wrong match before downloading
+- **Email drafts** — Auto-generated email bodies per network, ready to paste
+- **Multi-network** — Upload MTN and Telkom POs simultaneously; only the relevant templates are required
 
+---
 
- Parse VPS client PO PDFs automatically
- Load and aggregate stock-on-hand from VVS Excel report
- Calculate shortfall per product
- Match PO products to rows in network order templates (MTN + Telkom)
- Write order quantities into the correct cells in those templates
- Produce downloadable, ready-to-send template files
- Simple web UI accessible to the whole team (no coding required to use)
+## Tech Stack
 
+| Library | Purpose |
+|---|---|
+| `streamlit` | Web UI |
+| `pdfplumber` | PDF text extraction |
+| `openpyxl` | Read/write Excel templates |
+| `pandas` | Data manipulation |
+| `rapidfuzz` | Fuzzy string matching |
 
-Nice-to-have
+---
 
+## Setup
 
- Confidence scores on product matches
- Manual override / review table for low-confidence matches
- Auto-generated email drafts per network
- Flash Group branding in the UI
- Automatic email sending (future)
- Historical order log / audit trail (future)
- Vodacom and Cell C template support (future)
+### Prerequisites
 
+- Python 3.10 or newer — [python.org/downloads](https://www.python.org/downloads/)
+  - During install, tick **"Add Python to PATH"**
 
+### Install
 
-3. Constraints
+Open a terminal in this folder and run:
 
+```bash
+pip install -r requirements.txt
+```
 
-No backend server — the tool runs locally on a team member's laptop via streamlit run. No cloud hosting or IT involvement required.
-Existing file formats must be preserved — the MTN .xlsm (macro-enabled) and Telkom .xlsx templates contain formulas, validation rules, and macros that must not be broken. Only the quantity column is written.
-PDF format is fixed — the VPS PO PDFs have a consistent column structure: QTY  DESCRIPTION  UNIT_PRICE  DISC%  TOTAL. The parser anchors on the DISC% field (4 decimal places) as a reliable column marker.
-No external API access — all data is local (PDFs, Excel files). No network calls.
+### Run
 
+```bash
+streamlit run app.py
+```
 
+Your browser will open at `http://localhost:8501`. Press **Ctrl+C** to stop.
 
-4. Architecture
+---
 
-Pipeline (left to right)
+## Usage
 
-Client PO PDFs
-      │
-      ▼
- PDF Parser          ← pdfplumber, anchors on DISC% column
-      │
-      ▼
- PO Line Items       {qty, description} per product
-      │
-      ├──────────────────────────┐
-      ▼                          ▼
- SOH Lookup               Template Loader
- (VVS Excel)              (MTN .xlsm / Telkom .xlsx)
-      │                          │
-      ▼                          ▼
- Shortfall Calc           Template Row Index
-      │                          │
-      └──────────┬───────────────┘
-                 ▼
-          Matching Engine         ← rapidfuzz two-hop match
-                 │
-                 ▼
-          Results Table           pandas DataFrame
-                 │
-          ┌──────┴──────┐
-          ▼             ▼
-     Streamlit UI   Template Writer  ← openpyxl
-     (review/edit)       │
-                         ▼
-                   Download (.xlsm/.xlsx)
+### 1 — Upload files (sidebar)
 
-Two-hop matching
+| File | What it is |
+|---|---|
+| **SOH Report** | VVS stock-on-hand Excel (`VVS - SOH Report *.xlsx`) |
+| **MTN Order Template** | Flash Logical Catalogue `.xlsm` *(only needed for MTN POs)* |
+| **Telkom Order Template** | Airtime Order Form `.xlsx` *(only needed for Telkom POs)* |
+| **Client PO PDFs** | One or more VPS purchase order PDFs |
 
-Product names differ between the PO, the SOH report, and the order template — sometimes significantly. A direct string match fails too often. The approach:
+The app auto-detects the network from the filename. You can override it with the dropdown.
 
+### 2 — Analyse Orders
 
-PO → SOH: fuzzy match the PO product description against SOH product names to find the SOH qty
-PO → Template: fuzzy match the PO product description against template row labels to find the cell to write
+Click **Analyse Orders**. The app extracts every line item, checks SOH, calculates shortfalls, and matches each product to the correct row in the order template.
 
+### 3 — Tabs
 
-Both hops use the same scoring function.
+| Tab | What you do |
+|---|---|
+| **Stock Analysis** | Review the full results. Green = needs ordering, Yellow = low-confidence match |
+| **Review & Adjust** | Edit quantities or fix wrong matches. Click **Save changes** when done |
+| **Download Templates** | Download the completed order templates + copy email drafts |
 
-Matching score function (_score)
+---
 
-Plain fuzz.token_set_ratio is too permissive — it ignores important distinguishing features. The scoring function adds:
+## Confidence Scores
 
-FeatureLogicSize hard-filterIf both sides have a data size (e.g. 1gb, 500mb) and they don't match → score 0Rands hard-filterSame for rand values (R50, R150)Period mismatch penaltydaily vs weekly → -20Once-off penaltyTemplate row is once-off but query isn't → -15Content-type penaltyOne side has tiktok/whatsapp/freeme etc., other doesn't → -15Voice+ penaltyTemplate row adds voice bundles the query doesn't ask for → -15Size match bonusExact size match → +15Rands match bonusExact rand match → +15Minutes match bonusExact minute match → +10
+| Score | Meaning |
+|---|---|
+| 80 – 100 | High confidence — match is almost certainly correct |
+| 70 – 79 | Good — worth a quick glance |
+| 55 – 69 | Low — review recommended before sending |
+| < 55 | Very low — manually assign in the Review tab |
 
-Pre-processing:
+---
 
+## Project Structure
 
-+ replaced with space so 2.5GB+2.5GB tokenises as two separate sizes
-Size normalisation: 1.0gb → 1gb to avoid false mismatches
+```
+Automation - ordering/
+├── app.py               # Main Streamlit application
+├── requirements.txt     # Python dependencies
+├── README.md            # This file
+├── PLANNING.md          # Architecture and planning notes
+└── SETUP.md             # Quick setup guide for the team
+```
 
+---
 
+## Contributing
 
-5. Key Technical Decisions
+This is an internal team tool. To suggest changes or report a bug, raise it with the Cellular team directly.
 
-Why Streamlit?
+---
 
-The audience is non-technical team members. Streamlit turns a Python script into a web app with minimal code, runs locally with one command, and needs no deployment infrastructure. The team can run it themselves.
-
-Why not a macro / VBA solution?
-
-The SOH report and PO PDFs are external files not inside the Excel template. A Python solution handles cross-file reading more cleanly and is easier to maintain and extend.
-
-Why openpyxl, not xlwings or win32com?
-
-openpyxl reads and writes .xlsx/.xlsm files without needing Excel installed. This keeps the tool portable. The trade-off: macros in .xlsm files are preserved but not executed. Since the templates only need their QTY column filled, this is acceptable.
-
-Why rapidfuzz over standard difflib?
-
-rapidfuzz is significantly faster and provides token_set_ratio which handles reordered words well (e.g. "MTN 1GB Daily" vs "Daily 1GB MTN Bundle"). Speed matters less here, but the quality of token_set_ratio is the key reason.
-
-File editing workflow
-
-The app file (app.py) must never be edited directly in the OneDrive-synced folder. OneDrive's sync process can truncate a file mid-write. All edits are made to a local working copy, syntax-verified with ast.parse(), then copied to the OneDrive folder.
-
-
-6. Data Flow Detail
-
-PDF Parsing
-
-
-Anchor: DISC% column (regex \d+\.\d{4}) is always present and unique per line item
-QTY: extracted from the tokens before DESCRIPTION; handles space-thousands-separator (4 300 = 4300)
-Duplicate descriptions across pages are deduplicated (same product sometimes appears on multiple pages)
-
-
-SOH Loading
-
-
-VVS report columns: [Date, ..., Qty(col 3), ..., Product(col 8), ..., Vendor(col 11)]
-Same product can appear on multiple rows (different batch dates) — quantities are summed
-Result: {vendor: {product_name: total_qty}}
-
-
-Template Loading
-
-
-MTN: scans column B for product descriptions; order quantity written to column D
-Telkom: scans column C for product descriptions; order quantity written to column E
-Rows with blank product cells are skipped
-
-
-Shortfall Calculation
-
-order_qty = max(0, po_qty - soh_qty)
-
-If SOH exceeds the PO quantity, order qty is 0 (no order needed).
-
-
-7. Confidence Thresholds
-
-Chosen by manual review of match quality across real PO and template data:
-
-ThresholdValueRationaleCONFIDENCE_LOW55Below this, match is likely wrong — flag in redCONFIDENCE_WARN70Below this, worth a human glance — flag in yellow
-
-
-8. Future Roadmap
-
-Near-term
-
-
-Vodacom + Cell C templates — extend load_*_template_rows() and fill_*_template() for the remaining two networks
-Persistent match overrides — save a user's manual corrections so the same product is matched correctly next time
-Batch history — log each order run with a timestamp for audit purposes
-
-
-Longer-term
-
-
-Automatic email sending — integrate with Outlook via win32com or the Microsoft Graph API to send the completed templates directly
-SOH threshold alerts — flag products where SOH is critically low across all POs, not just the current batch
-Web deployment — host on an internal server (e.g. Streamlit Community Cloud or a company VM) so the team doesn't need a local Python install
-
-
-
-9. Development Log
-
-PhaseWhat was builtv0.1PDF parser + SOH loader + basic shortfall calculationv0.2Fuzzy matching engine (first version, basic token ratio)v0.3Template writer for MTN and Telkom; Streamlit UI with three tabsv0.4Matching improvements: size hard-filter, period penalty, content-type penalty, + normalisation, 1.0gb normalisationv0.5Flash Group branding (logo + colour scheme); optional templates (only require templates for networks present in uploaded POs); session state bug fix for network selectbox
+*Built for Flash Group Cellular Team*
