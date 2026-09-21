@@ -1,10 +1,8 @@
 """Load current stock-on-hand snapshot from the VVS_FORECAST workbook."""
 import pandas as pd
 
-VVS_FORECAST_PATH = (
-    r"C:\Users\TsatsiLetsoara\OneDrive - Flash\General - Airtime\Airtime Database"
-    r"\Templates\2023 Templates\Stock and pinless forecast\Daily Stock Forecast\VVS_FORECAST.xlsx"
-)
+from config import VVS_FORECAST_PATH
+
 SHEET_NAME = "FORECAST|AGGREGATION"
 HEADER_ROW = 4  # 5th row in the sheet holds the real column names
 

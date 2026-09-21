@@ -2,12 +2,17 @@
 
 Business constraint: holding excess stock hurts the stock-aging report,
 inventory turnover, and the working capital cycle. Orders happen once a
-month, so the goal is to land with exactly ~31 days of coverage after the
-order arrives - not a safety-stock-padded surplus, and not a shortfall:
+month and must stay within that calendar month - not a rolling 31 days that
+spills into the next order cycle. So the horizon is however many days are
+left in the current month: a full ~31 days if run at month start, shrinking
+as the month goes on, so the order always lands exactly at that month's end
+and never overlaps with next month's order:
 
-    order_up_to = forecast demand over the next 31 days
-    reorder_qty = max(order_up_to - current stock position, 0)
+    horizon      = days remaining in the current calendar month
+    order_up_to  = forecast demand over that horizon
+    reorder_qty  = max(order_up_to - current stock position, 0)
 """
+import calendar
 import os
 
 import pandas as pd
@@ -19,14 +24,20 @@ from soh import load_soh
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "output")
 
-MONTHLY_CYCLE_DAYS = 31
+
+def days_remaining_in_month(as_of: pd.Timestamp) -> int:
+    last_day_of_month = calendar.monthrange(as_of.year, as_of.month)[1]
+    return last_day_of_month - as_of.day
 
 
 def main():
     feat = pd.read_parquet(os.path.join(DATA_DIR, "features.parquet"))
     model, _, bias_correction = load_model()
 
-    daily_forecast = forecast(feat, model, horizon=MONTHLY_CYCLE_DAYS, bias_correction=bias_correction)
+    as_of = feat["date"].max()
+    horizon = max(days_remaining_in_month(as_of), 1)
+
+    daily_forecast = forecast(feat, model, horizon=horizon, bias_correction=bias_correction)
 
     sku_cols = [c for c in SKU_COLS if c != "Product"]
     forecast_total = (
@@ -62,8 +73,8 @@ def main():
     out_path = os.path.join(OUTPUT_DIR, "reorder_plan.xlsx")
     plan.to_excel(out_path, sheet_name="Reorder Plan", index=False)
 
-    print(f"Assumption: {MONTHLY_CYCLE_DAYS}-day monthly coverage, no safety-stock buffer "
-          f"(order sized to land at ~{MONTHLY_CYCLE_DAYS} days of stock, not more)")
+    print(f"Assumption: forecasting {horizon} day(s) remaining in {as_of.strftime('%B %Y')} "
+          f"(as of {as_of.date()}), no safety-stock buffer - order sized to land exactly at month-end")
     matched = plan[plan["has_soh_data"]]
     print(f"Total recommended reorder across {len(matched)} matched SKUs: {matched['reorder_qty'].sum():,.0f} units")
     print(f"Saved to {out_path}")

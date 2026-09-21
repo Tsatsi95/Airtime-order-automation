@@ -1,5 +1,6 @@
 $ErrorActionPreference = "Stop"
-$attachment = "C:\Users\TsatsiLetsoara\OneDrive - Flash\General - Airtime\Airtime Database\Templates\2023 Templates\Stock and pinless forecast\Daily Stock Forecast\ml_forecast\output\priority_order.xlsx"
+. (Join-Path $PSScriptRoot "paths.ps1")
+$attachment = Join-Path $MlForecastRoot "output\priority_order.xlsx"
 
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.MessageBox]::Show(

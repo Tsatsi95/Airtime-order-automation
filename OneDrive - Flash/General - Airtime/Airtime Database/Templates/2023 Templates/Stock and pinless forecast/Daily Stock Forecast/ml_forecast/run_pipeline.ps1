@@ -1,8 +1,9 @@
 $ErrorActionPreference = "Stop"
 
-$python = "C:\Users\TsatsiLetsoara\AppData\Local\Programs\Python\Python312\python.exe"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$src = Join-Path $root "src"
+. (Join-Path $root "paths.ps1")
+$python = $PythonExe
+$src = $MlForecastSrc
 $logDir = Join-Path $root "logs"
 
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }

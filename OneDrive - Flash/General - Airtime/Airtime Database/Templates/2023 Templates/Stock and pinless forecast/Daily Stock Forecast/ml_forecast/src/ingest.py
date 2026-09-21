@@ -4,10 +4,7 @@ import os
 
 import pandas as pd
 
-BOD_FOLDER = (
-    r"C:\Users\TsatsiLetsoara\OneDrive - Flash\General - Airtime\Airtime Database"
-    r"\Templates\Reports for templates\BOD - Order Report"
-)
+from config import BOD_FOLDER
 
 SKU_COLS = ["Vendor", "Product Type", "Product Code", "Product"]
 

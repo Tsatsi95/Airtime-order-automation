@@ -9,9 +9,7 @@ the model a leading signal for those spikes instead of just smoothing over them.
 """
 import pandas as pd
 
-MARKET_SHARE_PATH = (
-    r"C:\Users\TsatsiLetsoara\OneDrive - Flash\Documents\Reports\Nontu\Markets Shares\Market share.xlsx"
-)
+from config import MARKET_SHARE_PATH
 
 CLIENT_WINDOWS = [7, 30]
 
