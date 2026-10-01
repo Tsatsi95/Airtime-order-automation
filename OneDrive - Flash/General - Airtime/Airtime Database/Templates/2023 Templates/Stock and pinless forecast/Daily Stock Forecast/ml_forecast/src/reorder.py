@@ -25,9 +25,20 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "output")
 
 
-def days_remaining_in_month(as_of: pd.Timestamp) -> int:
-    last_day_of_month = calendar.monthrange(as_of.year, as_of.month)[1]
-    return last_day_of_month - as_of.day
+def days_to_real_month_end(as_of: pd.Timestamp, today: pd.Timestamp = None) -> int:
+    """Days to forecast forward from `as_of` through the end of the CURRENT
+    real-world month, determined by `today` (actual calendar date), not by
+    `as_of`'s own month. The underlying order data is typically a day or so
+    behind - if that lag happens to straddle a month boundary (e.g. today is
+    the 1st but the last available data is the 30th of last month), anchoring
+    to `as_of`'s month would wrongly target "1 day left in last month"
+    instead of the ~31 days actually needed to cover the new month.
+    """
+    if today is None:
+        today = pd.Timestamp.now().normalize()
+    last_day_of_month = calendar.monthrange(today.year, today.month)[1]
+    end_of_month = pd.Timestamp(year=today.year, month=today.month, day=last_day_of_month)
+    return (end_of_month - as_of).days
 
 
 def main():
@@ -35,7 +46,11 @@ def main():
     model, _, bias_correction = load_model()
 
     as_of = feat["date"].max()
-    horizon = max(days_remaining_in_month(as_of), 1)
+    horizon = max(days_to_real_month_end(as_of), 1)
+    if horizon > 45:
+        print(f"WARNING: horizon is {horizon} days, which is unusually long for a "
+              f"within-month forecast - the underlying order data (as of {as_of.date()}) "
+              f"may be significantly stale. Consider re-running ingest.py first.")
 
     daily_forecast = forecast(feat, model, horizon=horizon, bias_correction=bias_correction)
 
@@ -73,8 +88,9 @@ def main():
     out_path = os.path.join(OUTPUT_DIR, "reorder_plan.xlsx")
     plan.to_excel(out_path, sheet_name="Reorder Plan", index=False)
 
-    print(f"Assumption: forecasting {horizon} day(s) remaining in {as_of.strftime('%B %Y')} "
-          f"(as of {as_of.date()}), no safety-stock buffer - order sized to land exactly at month-end")
+    today = pd.Timestamp.now().normalize()
+    print(f"Assumption: forecasting {horizon} day(s) from {as_of.date()} through the end of "
+          f"{today.strftime('%B %Y')}, no safety-stock buffer - order sized to land exactly at month-end")
     matched = plan[plan["has_soh_data"]]
     print(f"Total recommended reorder across {len(matched)} matched SKUs: {matched['reorder_qty'].sum():,.0f} units")
     print(f"Saved to {out_path}")
