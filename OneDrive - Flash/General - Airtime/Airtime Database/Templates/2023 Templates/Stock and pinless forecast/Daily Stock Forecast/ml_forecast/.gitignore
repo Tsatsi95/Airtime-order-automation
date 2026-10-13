@@ -1,6 +1,0 @@
-data/
-models/
-output/
-logs/
-__pycache__/
-*.pyc
