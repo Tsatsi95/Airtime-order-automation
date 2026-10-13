@@ -101,7 +101,20 @@ files, that's a bug — route it through config.py/paths.ps1 instead.**
 - **Horizon = days remaining in the current calendar month, not a rolling
   31 days.** Orders happen once a month; a rolling 31-day horizon would
   spill into next month's own order and cause overlap/over-purchase. See
-  `days_remaining_in_month()` in `reorder.py`.
+  `days_to_real_month_end()` in `reorder.py`.
+  **The target month comes from today's real date, not from the month of the
+  latest order data.** The order data is normally a day or so behind. An
+  earlier version anchored on the data's own month, so on 1 Oct 2026 (latest
+  data: 30 Sep) it computed "1 day left in September" and recommended only
+  ~155K units instead of the ~7.3M needed to cover October — a dangerously
+  small order, on exactly the day the monthly order gets placed. Fixed in
+  commit `9e69da2`: the horizon is now `(end of the current real month) -
+  (date of the latest data)`, which is correct across month boundaries. If
+  `reorder.py` prints a WARNING that the horizon is over 45 days, the order
+  data is badly stale — rerun `ingest.py` before trusting the numbers. When
+  reviewing output at the start of any month, sanity-check that the printed
+  "forecasting N day(s) ... through the end of <Month>" line names the
+  current month and N is roughly 30.
 - **Internal stock transfers excluded from training data.** The BOD Order
   Report includes bulk "orders" that are actually stock moved between
   internal accounts (originally under "Flash Trader VS"), not real customer
